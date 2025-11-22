@@ -10,7 +10,20 @@ const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex';
 
 // User data storage (in production, use a database)
 const users = new Map();
-const positions = new Map();
+const leaderboard = new Map(); // Global leaderboard
+
+// Chain emojis
+const CHAIN_EMOJIS = {
+  'SOLANA': '◎',
+  'ETHEREUM': 'Ξ',
+  'BSC': '⚡',
+  'BASE': '🔵'
+};
+
+// Get chain emoji
+function getChainEmoji(chain) {
+  return CHAIN_EMOJIS[chain.toUpperCase()] || '🔗';
+}
 
 // Initialize user balances
 function initUser(userId) {
@@ -22,9 +35,10 @@ function initUser(userId) {
         BNB: 1000,
         BASE: 1000
       },
-      positions: []
+      positions: [],
+      totalProfit: 0,
+      firstName: ''
     });
-    positions.set(userId, []);
   }
   return users.get(userId);
 }
@@ -85,22 +99,63 @@ async function fetchTokenData(tokenCA) {
   }
 }
 
+// Update leaderboard
+function updateLeaderboard(userId, firstName, profit) {
+  const existing = leaderboard.get(userId) || { firstName, totalProfit: 0, trades: 0 };
+  existing.totalProfit += profit;
+  existing.trades += 1;
+  existing.firstName = firstName;
+  leaderboard.set(userId, existing);
+}
+
+// Get leaderboard text
+function getLeaderboardText() {
+  const sorted = Array.from(leaderboard.entries())
+    .sort((a, b) => b[1].totalProfit - a[1].totalProfit)
+    .slice(0, 10);
+  
+  if (sorted.length === 0) {
+    return '🏆 *LEADERBOARD* 🏆\n\n━━━━━━━━━━━━━━━━━━━━━\n\n❌ No traders yet!\n\nClose a profitable position to appear here.\n\n━━━━━━━━━━━━━━━━━━━━━';
+  }
+  
+  let text = '🏆 *LEADERBOARD* 🏆\n\n━━━━━━━━━━━━━━━━━━━━━\n\n';
+  
+  const medals = ['🥇', '🥈', '🥉'];
+  sorted.forEach(([userId, data], idx) => {
+    const position = idx < 3 ? medals[idx] : `${idx + 1}.`;
+    const profitEmoji = data.totalProfit >= 0 ? '🟢' : '🔴';
+    text += `${position} *${data.firstName}*\n`;
+    text += `   ${profitEmoji} Profit: $${formatNumber(data.totalProfit)}\n`;
+    text += `   📊 Trades: ${data.trades}\n\n`;
+  });
+  
+  text += '━━━━━━━━━━━━━━━━━━━━━';
+  return text;
+}
+
 // Welcome message
 const welcomeMessage = `🎰 *Welcome to Demo Degen Bot!* 🚀
+
+━━━━━━━━━━━━━━━━━━━━━
 
 This is a demo trading bot where you can practice degen trading strategies with virtual funds!
 
 💰 *Starting Balances:*
-• SOL: $1,000
-• ETH: $1,000
-• BNB: $1,000
-• BASE: $1,000
+   • SOL: $1,000
+   • ETH: $1,000
+   • BNB: $1,000
+   • BASE: $1,000
+
+━━━━━━━━━━━━━━━━━━━━━
 
 📖 *How to Use:*
+
 1️⃣ Send any token Contract Address (CA)
 2️⃣ View REAL token details from DexScreener
 3️⃣ Open positions and track them
-4️⃣ Compete on the leaderboard!
+4️⃣ Close positions and climb the leaderboard!
+
+━━━━━━━━━━━━━━━━━━━━━
 
 ⚠️ *Remember:* This is DEMO only - no real money involved!
 
@@ -114,8 +169,12 @@ function getMenuMessage(userId) {
   
   return `📊 *MAIN MENU* 📊
 
-💎 SOL Balance: *$${formatNumber(solBalance)}*
-📈 Open Positions: *${openPositions > 0 ? `(${openPositions})` : 'None'}*
+━━━━━━━━━━━━━━━━━━━━━
+
+💎 *SOL Balance:* $${formatNumber(solBalance)}
+📈 *Open Positions:* ${openPositions > 0 ? `(${openPositions})` : 'None'}
+
+━━━━━━━━━━━━━━━━━━━━━
 
 Select an option below:`;
 }
@@ -143,7 +202,8 @@ bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   
-  initUser(userId);
+  const user = initUser(userId);
+  user.firstName = msg.from.first_name || 'Trader';
   
   bot.sendMessage(chatId, welcomeMessage, {
     parse_mode: 'Markdown',
@@ -173,10 +233,10 @@ bot.on('callback_query', async (query) => {
   
   else if (data === 'menu_positions') {
     const user = initUser(userId);
-    let posText = '📊 *YOUR POSITIONS* 📊\n\n';
+    let posText = '📊 *YOUR POSITIONS* 📊\n\n━━━━━━━━━━━━━━━━━━━━━\n\n';
     
     if (user.positions.length === 0) {
-      posText += '❌ No open positions\n\nSend a token CA to start trading!';
+      posText += '❌ No open positions\n\nSend a token CA to start trading!\n\n━━━━━━━━━━━━━━━━━━━━━';
     } else {
       for (let idx = 0; idx < user.positions.length; idx++) {
         const pos = user.positions[idx];
@@ -185,29 +245,34 @@ bot.on('callback_query', async (query) => {
         const tokenData = await fetchTokenData(pos.tokenCA);
         if (tokenData.success) {
           pos.currentPrice = tokenData.price;
-          pos.currentValue = (pos.amount / pos.entryPrice) * pos.currentPrice;
+          // Calculate token amount based on initial investment
+          const tokenAmount = pos.invested / pos.entryPrice;
+          // Calculate current value based on token amount
+          pos.currentValue = tokenAmount * pos.currentPrice;
         }
         
         const pnl = pos.currentValue - pos.invested;
         const pnlPercent = ((pnl / pos.invested) * 100).toFixed(2);
         const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
         
-        posText += `*Position ${idx + 1}*\n`;
-        posText += `Token: ${pos.tokenName} (${pos.tokenSymbol})\n`;
-        posText += `Chain: ${pos.chain}\n`;
-        posText += `Entry: $${formatPrice(pos.entryPrice)}\n`;
-        posText += `Current: $${formatPrice(pos.currentPrice)}\n`;
-        posText += `Invested: $${formatNumber(pos.invested)}\n`;
-        posText += `Value: $${formatNumber(pos.currentValue)}\n`;
-        posText += `${pnlEmoji} P&L: $${formatNumber(pnl)} (${pnlPercent}%)\n\n`;
+        posText += `*Position ${idx + 1}* - ${pos.tokenSymbol}\n\n`;
+        posText += `📛 Token: ${pos.tokenName}\n`;
+        posText += `${getChainEmoji(pos.chain)} Chain: ${pos.chain}\n\n`;
+        posText += `💵 Entry: $${formatPrice(pos.entryPrice)}\n`;
+        posText += `💵 Current: $${formatPrice(pos.currentPrice)}\n\n`;
+        posText += `💰 Invested: $${formatNumber(pos.invested)}\n`;
+        posText += `💎 Value: $${formatNumber(pos.currentValue)}\n\n`;
+        posText += `${pnlEmoji} *P&L: $${formatNumber(pnl)} (${pnlPercent}%)*\n\n`;
+        posText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
       }
     }
     
     const keyboard = {
       inline_keyboard: [
         [{ text: '🔄 REFRESH', callback_data: 'refresh_positions' }],
+        user.positions.length > 0 ? [{ text: '❌ CLOSE POSITION', callback_data: 'select_close_position' }] : [],
         [{ text: '🏠 MENU', callback_data: 'open_menu' }]
-      ]
+      ].filter(row => row.length > 0)
     };
     
     bot.editMessageText(posText, {
@@ -218,13 +283,110 @@ bot.on('callback_query', async (query) => {
     });
   }
   
+  else if (data === 'select_close_position') {
+    const user = initUser(userId);
+    let posText = '❌ *CLOSE POSITION* ❌\n\n━━━━━━━━━━━━━━━━━━━━━\n\nSelect a position to close:\n\n';
+    
+    const buttons = [];
+    user.positions.forEach((pos, idx) => {
+      const pnl = pos.currentValue - pos.invested;
+      const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
+      buttons.push([{ 
+        text: `${pnlEmoji} Position ${idx + 1}: ${pos.tokenSymbol} (${formatNumber(pnl)})`, 
+        callback_data: `close_pos_${idx}` 
+      }]);
+    });
+    
+    buttons.push([{ text: '🔙 BACK', callback_data: 'menu_positions' }]);
+    
+    bot.editMessageText(posText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: buttons }
+    });
+  }
+  
+  else if (data.startsWith('close_pos_')) {
+    const posIndex = parseInt(data.split('_')[2]);
+    const user = initUser(userId);
+    const pos = user.positions[posIndex];
+    
+    if (!pos) {
+      bot.answerCallbackQuery(query.id, { text: '❌ Position not found!', show_alert: true });
+      return;
+    }
+    
+    // Fetch final price
+    const tokenData = await fetchTokenData(pos.tokenCA);
+    if (tokenData.success) {
+      pos.currentPrice = tokenData.price;
+      const tokenAmount = pos.invested / pos.entryPrice;
+      pos.currentValue = tokenAmount * pos.currentPrice;
+    }
+    
+    const pnl = pos.currentValue - pos.invested;
+    const pnlPercent = ((pnl / pos.invested) * 100).toFixed(2);
+    const pnlEmoji = pnl >= 0 ? '✅' : '❌';
+    
+    // Return funds to balance
+    const chainMap = {
+      'SOLANA': 'SOL',
+      'ETHEREUM': 'ETH',
+      'BSC': 'BNB',
+      'BASE': 'BASE'
+    };
+    const chain = chainMap[pos.chain] || 'SOL';
+    user.balances[chain] += pos.currentValue;
+    
+    // Update leaderboard if profit
+    if (pnl > 0) {
+      updateLeaderboard(userId, user.firstName, pnl);
+    }
+    user.totalProfit += pnl;
+    
+    // Remove position
+    user.positions.splice(posIndex, 1);
+    
+    const closeText = `${pnlEmoji} *POSITION CLOSED* ${pnlEmoji}\n\n━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `📛 Token: ${pos.tokenName} (${pos.tokenSymbol})\n` +
+      `${getChainEmoji(pos.chain)} Chain: ${pos.chain}\n\n` +
+      `💵 Entry: $${formatPrice(pos.entryPrice)}\n` +
+      `💵 Exit: $${formatPrice(pos.currentPrice)}\n\n` +
+      `💰 Invested: $${formatNumber(pos.invested)}\n` +
+      `💎 Returned: $${formatNumber(pos.currentValue)}\n\n` +
+      `${pnl >= 0 ? '🟢' : '🔴'} *Final P&L: $${formatNumber(pnl)} (${pnlPercent}%)*\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      (pnl > 0 ? '🎉 Profit added to leaderboard!' : '💪 Better luck next time!');
+    
+    bot.editMessageText(closeText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📊 POSITIONS', callback_data: 'menu_positions' }],
+          [{ text: '🏠 MENU', callback_data: 'open_menu' }]
+        ]
+      }
+    });
+  }
+  
   else if (data === 'refresh_positions') {
     const user = initUser(userId);
-    let posText = '📊 *YOUR POSITIONS* 📊\n\n🔄 Refreshing...\n\n';
+    let posText = '📊 *YOUR POSITIONS* 📊\n\n━━━━━━━━━━━━━━━━━━━━━\n\n🔄 Refreshing...\n\n';
+    
+    bot.editMessageText(posText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown'
+    });
     
     if (user.positions.length === 0) {
-      posText = '📊 *YOUR POSITIONS* 📊\n\n❌ No open positions';
+      posText = '📊 *YOUR POSITIONS* 📊\n\n━━━━━━━━━━━━━━━━━━━━━\n\n❌ No open positions\n\n━━━━━━━━━━━━━━━━━━━━━';
     } else {
+      posText = '📊 *YOUR POSITIONS* 📊\n\n━━━━━━━━━━━━━━━━━━━━━\n\n';
+      
       for (let idx = 0; idx < user.positions.length; idx++) {
         const pos = user.positions[idx];
         
@@ -232,31 +394,32 @@ bot.on('callback_query', async (query) => {
         const tokenData = await fetchTokenData(pos.tokenCA);
         if (tokenData.success) {
           pos.currentPrice = tokenData.price;
-          pos.currentValue = (pos.amount / pos.entryPrice) * pos.currentPrice;
+          const tokenAmount = pos.invested / pos.entryPrice;
+          pos.currentValue = tokenAmount * pos.currentPrice;
         }
         
         const pnl = pos.currentValue - pos.invested;
         const pnlPercent = ((pnl / pos.invested) * 100).toFixed(2);
         const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
         
-        if (idx === 0) posText = '📊 *YOUR POSITIONS* 📊\n\n';
-        
-        posText += `*Position ${idx + 1}*\n`;
-        posText += `Token: ${pos.tokenName} (${pos.tokenSymbol})\n`;
-        posText += `Chain: ${pos.chain}\n`;
-        posText += `Entry: $${formatPrice(pos.entryPrice)}\n`;
-        posText += `Current: $${formatPrice(pos.currentPrice)}\n`;
-        posText += `Invested: $${formatNumber(pos.invested)}\n`;
-        posText += `Value: $${formatNumber(pos.currentValue)}\n`;
-        posText += `${pnlEmoji} P&L: $${formatNumber(pnl)} (${pnlPercent}%)\n\n`;
+        posText += `*Position ${idx + 1}* - ${pos.tokenSymbol}\n\n`;
+        posText += `📛 Token: ${pos.tokenName}\n`;
+        posText += `${getChainEmoji(pos.chain)} Chain: ${pos.chain}\n\n`;
+        posText += `💵 Entry: $${formatPrice(pos.entryPrice)}\n`;
+        posText += `💵 Current: $${formatPrice(pos.currentPrice)}\n\n`;
+        posText += `💰 Invested: $${formatNumber(pos.invested)}\n`;
+        posText += `💎 Value: $${formatNumber(pos.currentValue)}\n\n`;
+        posText += `${pnlEmoji} *P&L: $${formatNumber(pnl)} (${pnlPercent}%)*\n\n`;
+        posText += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
       }
     }
     
     const keyboard = {
       inline_keyboard: [
         [{ text: '🔄 REFRESH', callback_data: 'refresh_positions' }],
+        user.positions.length > 0 ? [{ text: '❌ CLOSE POSITION', callback_data: 'select_close_position' }] : [],
         [{ text: '🏠 MENU', callback_data: 'open_menu' }]
-      ]
+      ].filter(row => row.length > 0)
     };
     
     bot.editMessageText(posText, {
@@ -269,7 +432,7 @@ bot.on('callback_query', async (query) => {
   
   else if (data === 'menu_balance') {
     const user = initUser(userId);
-    let balText = '💰 *YOUR BALANCES* 💰\n\n';
+    let balText = '💰 *YOUR BALANCES* 💰\n\n━━━━━━━━━━━━━━━━━━━━━\n\n';
     
     for (const [chain, amount] of Object.entries(user.balances)) {
       balText += `${chain}: *$${formatNumber(amount)}*\n`;
@@ -278,8 +441,11 @@ bot.on('callback_query', async (query) => {
     const totalPositions = user.positions.reduce((sum, pos) => sum + pos.currentValue, 0);
     const totalBalance = Object.values(user.balances).reduce((sum, val) => sum + val, 0);
     
-    balText += `\n📊 In Positions: *$${formatNumber(totalPositions)}*`;
-    balText += `\n💎 Total Portfolio: *$${formatNumber(totalBalance + totalPositions)}*`;
+    balText += `\n━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    balText += `📊 In Positions: *$${formatNumber(totalPositions)}*\n`;
+    balText += `💎 Total Portfolio: *$${formatNumber(totalBalance + totalPositions)}*\n`;
+    balText += `${user.totalProfit >= 0 ? '🟢' : '🔴'} All-Time P&L: *$${formatNumber(user.totalProfit)}*\n\n`;
+    balText += `━━━━━━━━━━━━━━━━━━━━━`;
     
     bot.editMessageText(balText, {
       chat_id: chatId,
@@ -294,12 +460,17 @@ bot.on('callback_query', async (query) => {
   else if (data === 'menu_analysis') {
     const analysisText = `🔍 *MARKET ANALYSIS* 🔍
 
+━━━━━━━━━━━━━━━━━━━━━
+
 📈 Send a token CA to get:
+
 • Real-time price data
 • 24h volume & liquidity
 • Price change statistics
 • Market cap information
 • DEX trading pairs
+
+━━━━━━━━━━━━━━━━━━━━━
 
 Powered by DexScreener API 🚀`;
     
@@ -314,15 +485,7 @@ Powered by DexScreener API 🚀`;
   }
   
   else if (data === 'menu_leaderboard') {
-    let leaderText = '🏆 *LEADERBOARD* 🏆\n\n';
-    leaderText += '🥇 DegenKing: $15,420\n';
-    leaderText += '🥈 MoonBoi: $12,850\n';
-    leaderText += '🥉 DiamondHands: $9,600\n';
-    leaderText += '4️⃣ PaperHands: $7,200\n';
-    leaderText += '5️⃣ You: $4,000\n\n';
-    leaderText += '💪 Keep trading to climb the ranks!';
-    
-    bot.editMessageText(leaderText, {
+    bot.editMessageText(getLeaderboardText(), {
       chat_id: chatId,
       message_id: messageId,
       parse_mode: 'Markdown',
@@ -335,14 +498,84 @@ Powered by DexScreener API 🚀`;
   else if (data === 'menu_settings') {
     const settingsText = `⚙️ *SETTINGS* ⚙️
 
+━━━━━━━━━━━━━━━━━━━━━
+
 🔔 Notifications: ON
 🌐 Default Chain: SOL
 ⚡ Slippage: 1%
 ⏱️ Auto-Refresh: 30s
 
-Settings coming soon!`;
+━━━━━━━━━━━━━━━━━━━━━
+
+Click below to reset your account:`;
     
     bot.editMessageText(settingsText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔄 RESET ACCOUNT', callback_data: 'confirm_reset' }],
+          [{ text: '🏠 MENU', callback_data: 'open_menu' }]
+        ]
+      }
+    });
+  }
+  
+  else if (data === 'confirm_reset') {
+    const confirmText = `⚠️ *CONFIRM RESET* ⚠️
+
+━━━━━━━━━━━━━━━━━━━━━
+
+Are you sure you want to reset your account?
+
+This will:
+• Close all open positions
+• Reset all balances to $1,000
+• Clear your trading history
+• Remove you from leaderboard
+
+━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ *This action cannot be undone!*`;
+    
+    bot.editMessageText(confirmText, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✅ YES, RESET', callback_data: 'execute_reset' }],
+          [{ text: '❌ CANCEL', callback_data: 'menu_settings' }]
+        ]
+      }
+    });
+  }
+  
+  else if (data === 'execute_reset') {
+    users.delete(userId);
+    leaderboard.delete(userId);
+    
+    const user = initUser(userId);
+    user.firstName = query.from.first_name || 'Trader';
+    
+    const resetText = `✅ *ACCOUNT RESET SUCCESSFUL* ✅
+
+━━━━━━━━━━━━━━━━━━━━━
+
+Your account has been reset!
+
+💰 New Balances:
+   • SOL: $1,000
+   • ETH: $1,000
+   • BNB: $1,000
+   • BASE: $1,000
+
+━━━━━━━━━━━━━━━━━━━━━
+
+Good luck with your fresh start! 🚀`;
+    
+    bot.editMessageText(resetText, {
       chat_id: chatId,
       message_id: messageId,
       parse_mode: 'Markdown',
@@ -369,12 +602,11 @@ Settings coming soon!`;
     const tokenCA = parts.slice(2).join('_');
     
     if (amount === 'custom') {
-      bot.sendMessage(chatId, '💵 Enter custom amount (e.g., 50):', {
+      bot.sendMessage(chatId, '💵 Enter custom amount in USD (e.g., 50):', {
         reply_markup: {
           force_reply: true
         }
       });
-      // Store token CA for later
       users.get(userId).pendingToken = tokenCA;
       users.get(userId).pendingMessageId = messageId;
     } else {
@@ -401,10 +633,8 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id;
   const text = msg.text;
   
-  // Skip commands
   if (!text || text.startsWith('/')) return;
   
-  // Check if user is entering custom amount
   const user = users.get(userId);
   if (user && user.pendingToken && msg.reply_to_message) {
     const amount = parseFloat(text);
@@ -416,7 +646,6 @@ bot.on('message', async (msg) => {
     }
   }
   
-  // Check if it looks like a CA (alphanumeric, 32-44 chars)
   const caPattern = /^[A-Za-z0-9]{32,44}$/;
   if (caPattern.test(text.trim())) {
     const tokenCA = text.trim();
@@ -433,7 +662,7 @@ async function showTokenDetails(chatId, messageId, tokenCA) {
   const tokenData = await fetchTokenData(tokenCA);
   
   if (!tokenData.success) {
-    bot.editMessageText(`❌ *ERROR* ❌\n\n${tokenData.error}\n\nPlease check the contract address and try again.`, {
+    bot.editMessageText(`❌ *ERROR* ❌\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${tokenData.error}\n\nPlease check the contract address and try again.\n\n━━━━━━━━━━━━━━━━━━━━━`, {
       chat_id: chatId,
       message_id: messageId,
       parse_mode: 'Markdown',
@@ -446,36 +675,56 @@ async function showTokenDetails(chatId, messageId, tokenCA) {
   
   const priceChangeEmoji = tokenData.priceChange24h >= 0 ? '🟢' : '🔴';
   const priceChangeText = tokenData.priceChange24h >= 0 ? '+' : '';
+  const chainEmoji = getChainEmoji(tokenData.chain);
   
   const detailsText = `🪙 *TOKEN DETAILS* 🪙
 
-📛 Name: *${tokenData.name}*
-💎 Symbol: *${tokenData.symbol}*
-📝 CA: \`${tokenCA}\`
+━━━━━━━━━━━━━━━━━━━━━
 
-⛓️ Chain: *${tokenData.chain}*
-🏪 DEX: *${tokenData.dexId}*
+📛 *Name:* ${tokenData.name}
+💎 *Symbol:* ${tokenData.symbol}
+📝 *CA:* \`${tokenCA}\`
 
-💵 Price: *$${formatPrice(tokenData.price)}*
-${priceChangeEmoji} 24h Change: *${priceChangeText}${tokenData.priceChange24h.toFixed(2)}%*
+${chainEmoji} *Chain:* ${tokenData.chain}
+🏪 *DEX:* ${tokenData.dexId}
 
-📊 Market Cap: *$${formatNumber(tokenData.marketCap)}*
-💧 Liquidity: *$${formatNumber(tokenData.liquidity)}*
-📈 Volume 24h: *$${formatNumber(tokenData.volume24h)}*
+━━━━━━━━━━━━━━━━━━━━━
 
-🔗 [View on DexScreener](${tokenData.url})`;
+💵 *Price:* $${formatPrice(tokenData.price)}
+${priceChangeEmoji} *24h Change:* ${priceChangeText}${tokenData.priceChange24h.toFixed(2)}%
+
+━━━━━━━━━━━━━━━━━━━━━
+
+📊 *Market Cap:* ${formatNumber(tokenData.marketCap)}
+💧 *Liquidity:* ${formatNumber(tokenData.liquidity)}
+📈 *Volume 24h:* ${formatNumber(tokenData.volume24h)}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+🔗 [View on DexScreener](${tokenData.url})
+
+━━━━━━━━━━━━━━━━━━━━━`;
+
+  // Determine chain for button labels
+  const chainMap = {
+    'SOLANA': '◎',
+    'ETHEREUM': 'Ξ',
+    'BSC': '⚡',
+    'BASE': '🔵'
+  };
+  const chainSymbol = chainMap[tokenData.chain] || '🔗';
 
   const keyboard = {
     inline_keyboard: [
       [
-        { text: '💵 $10', callback_data: `buy_10_${tokenCA}` },
-        { text: '💵 $25', callback_data: `buy_25_${tokenCA}` },
-        { text: '💵 $50', callback_data: `buy_50_${tokenCA}` }
+        { text: `${chainSymbol} $10`, callback_data: `buy_10_${tokenCA}` },
+        { text: `${chainSymbol} $25`, callback_data: `buy_25_${tokenCA}` },
+        { text: `${chainSymbol} $50`, callback_data: `buy_50_${tokenCA}` }
       ],
       [
-        { text: '💵 $100', callback_data: `buy_100_${tokenCA}` },
-        { text: '💵 $250', callback_data: `buy_250_${tokenCA}` },
-        { text: '💵 $500', callback_data: `buy_500_${tokenCA}` }
+        { text: `${chainSymbol} $100`, callback_data: `buy_100_${tokenCA}` },
+        { text: `${chainSymbol} $250`, callback_data: `buy_250_${tokenCA}` },
+        { text: `${chainSymbol} $500`, callback_data: `buy_500_${tokenCA}` }
       ],
       [{ text: '✏️ CUSTOM AMOUNT', callback_data: `buy_custom_${tokenCA}` }],
       [
@@ -498,11 +747,6 @@ ${priceChangeEmoji} 24h Change: *${priceChangeText}${tokenData.priceChange24h.to
 async function executeBuy(chatId, userId, messageId, tokenCA, amount) {
   const user = initUser(userId);
   
-  if (user.balances.SOL < amount) {
-    bot.sendMessage(chatId, '❌ Insufficient SOL balance!');
-    return;
-  }
-  
   // Fetch current token data
   const tokenData = await fetchTokenData(tokenCA);
   
@@ -511,7 +755,21 @@ async function executeBuy(chatId, userId, messageId, tokenCA, amount) {
     return;
   }
   
-  user.balances.SOL -= amount;
+  // Determine which balance to use based on chain
+  const chainMap = {
+    'SOLANA': 'SOL',
+    'ETHEREUM': 'ETH',
+    'BSC': 'BNB',
+    'BASE': 'BASE'
+  };
+  const chain = chainMap[tokenData.chain] || 'SOL';
+  
+  if (user.balances[chain] < amount) {
+    bot.sendMessage(chatId, `❌ Insufficient ${chain} balance!\n\nYour ${chain} balance: ${formatNumber(user.balances[chain])}`);
+    return;
+  }
+  
+  user.balances[chain] -= amount;
   
   const position = {
     tokenCA: tokenCA,
@@ -522,18 +780,24 @@ async function executeBuy(chatId, userId, messageId, tokenCA, amount) {
     entryPrice: tokenData.price,
     currentPrice: tokenData.price,
     currentValue: amount,
-    amount: amount,
     timestamp: Date.now()
   };
   
   user.positions.push(position);
   
+  const chainEmoji = getChainEmoji(tokenData.chain);
+  
   const confirmText = `✅ *POSITION OPENED!* ✅
 
-🪙 Token: ${tokenData.name} (${tokenData.symbol})
-💰 Invested: $${formatNumber(amount)}
-💵 Entry Price: $${formatPrice(tokenData.price)}
-⛓️ Chain: ${tokenData.chain}
+━━━━━━━━━━━━━━━━━━━━━
+
+🪙 *Token:* ${tokenData.name} (${tokenData.symbol})
+${chainEmoji} *Chain:* ${tokenData.chain}
+
+💰 *Invested:* ${formatNumber(amount)}
+💵 *Entry Price:* ${formatPrice(tokenData.price)}
+
+━━━━━━━━━━━━━━━━━━━━━
 
 📊 Track your position in the POSITIONS menu!`;
 
