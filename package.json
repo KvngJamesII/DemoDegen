@@ -1,0 +1,26 @@
+{
+  "name": "demo-degen-bot",
+  "version": "1.0.0",
+  "description": "Demo Telegram trading bot with real DexScreener data",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "crypto",
+    "trading",
+    "dexscreener"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "axios": "^1.6.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
